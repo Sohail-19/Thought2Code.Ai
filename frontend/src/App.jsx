@@ -2,6 +2,7 @@ import { useState } from "react";
 import ProjectFiles from "./ProjectFiles.jsx";
 import { API_BASE_URL } from "./api.js";
 import { parseGenerateResponse } from "./generationResponse.js";
+import { requestProjectArchive } from "./projectDownload.js";
 
 const EXAMPLES = [
   {
@@ -92,7 +93,14 @@ function ProjectSummary({ project }) {
   );
 }
 
-function ResultsPanel({ result, loading, error }) {
+function ResultsPanel({
+  result,
+  loading,
+  error,
+  downloading,
+  downloadError,
+  onDownload,
+}) {
   return (
     <aside className={`results-panel${result ? " has-result" : ""}`} aria-live="polite">
       <div className="panel-heading">
@@ -100,7 +108,21 @@ function ResultsPanel({ result, loading, error }) {
           <div className="eyebrow">YOUR WORKSPACE</div>
           <h2>{result ? "Generation complete" : "Your project starts here"}</h2>
         </div>
-        <span className="panel-icon" aria-hidden="true">⌘</span>
+        <div className="panel-heading-actions">
+          <button
+            className="download-button"
+            type="button"
+            disabled={!result || result.status !== "completed" || downloading}
+            onClick={() => result && onDownload(result.job_id)}
+          >
+            {downloading ? (
+              <><span className="button-spinner" /> Preparing ZIP</>
+            ) : (
+              <>Download ZIP <span aria-hidden="true">↓</span></>
+            )}
+          </button>
+          <span className="panel-icon" aria-hidden="true">⌘</span>
+        </div>
       </div>
 
       {loading ? (
@@ -121,6 +143,7 @@ function ResultsPanel({ result, loading, error }) {
         </div>
       ) : result ? (
         <>
+          {downloadError && <p className="download-error" role="alert">{downloadError}</p>}
           <ProjectSummary project={result.project} />
           <div className="file-output">
             <ProjectFiles
@@ -172,6 +195,8 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   const promptLength = prompt.trim().length;
   const promptError = promptLength > 0 && promptLength < 10
@@ -194,6 +219,7 @@ function App() {
 
     setLoading(true);
     setError("");
+    setDownloadError("");
     setResult(null);
 
     try {
@@ -219,9 +245,42 @@ function App() {
     }
   }
 
+  async function handleDownload(jobId) {
+    if (
+      !result ||
+      result.status !== "completed" ||
+      result.job_id !== jobId ||
+      downloading
+    ) {
+      return;
+    }
+    setDownloading(true);
+    setDownloadError("");
+    try {
+      const archive = await requestProjectArchive(jobId, API_BASE_URL);
+      const objectUrl = URL.createObjectURL(archive);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `thought2code-${jobId}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (downloadRequestError) {
+      setDownloadError(
+        downloadRequestError instanceof TypeError
+          ? "Could not reach the local API to download this project. Check that the backend is running."
+          : downloadRequestError.message || "The project download failed. Please try again.",
+      );
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   function chooseExample(examplePrompt) {
     setPrompt(examplePrompt);
     setError("");
+    setDownloadError("");
     setResult(null);
   }
 
@@ -273,7 +332,14 @@ function App() {
             </form>
             <ExamplePrompts onSelect={chooseExample} disabled={loading} />
           </div>
-          <ResultsPanel result={result} loading={loading} error={error && !result ? error : ""} />
+          <ResultsPanel
+            result={result}
+            loading={loading}
+            error={error && !result ? error : ""}
+            downloading={downloading}
+            downloadError={downloadError}
+            onDownload={handleDownload}
+          />
         </section>
 
         <div className="workflow-note"><span className="workflow-icon">✳</span><span><strong>One request, one complete build.</strong> Generation runs synchronously, so keep this page open while your project is being created.</span></div>

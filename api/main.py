@@ -3,15 +3,22 @@ import logging
 import os
 import re
 import stat
+import tempfile
+import traceback
+import unicodedata
+import zipfile
 from collections.abc import Mapping
+from ipaddress import ip_address
 from pathlib import PurePosixPath
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from groq import RateLimitError
 from pydantic import BaseModel, ConfigDict, StringConstraints
+from starlette.background import BackgroundTask
 
 from agent.graph import agent
 from agent.tools import use_project_root
@@ -19,8 +26,59 @@ from agent.tools import use_project_root
 
 PROJECTS_ROOT = pathlib.Path(__file__).resolve().parents[1] / "generated_project" / "jobs"
 JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+SENSITIVE_ARCHIVE_NAME_PATTERN = re.compile(
+    r"(^|[._-])(credential|credentials|secret|secrets|token|tokens|password|passwords|private[_-]?key|api[_-]?key)([._-]|$)"
+)
+SENSITIVE_CONTENT_PATTERNS = (
+    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(rb"\bgsk_[A-Za-z0-9_-]{20,}\b"),
+    re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b"),
+    re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+)
 MAX_VIEWABLE_FILE_BYTES = 1_048_576
 MAX_JOB_FILE_COUNT = 1_000
+MAX_DOWNLOAD_BYTES = 50 * 1_048_576
+ARCHIVE_EXCLUDED_PARTS = {
+    ".cache",
+    ".conda",
+    ".git",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "__pypackages__",
+    "cache",
+    "env",
+    "node_modules",
+    "venv",
+}
+ARCHIVE_EXCLUDED_NAMES = {
+    "auth.json",
+    "authorized_keys",
+    "credentials",
+    "credentials.json",
+    "credentials.toml",
+    "credentials.yaml",
+    "id_ed25519",
+    "id_rsa",
+    "known_hosts",
+    "password.txt",
+    "passwords.txt",
+    "private_key.txt",
+    "private-key.txt",
+    "secret.txt",
+    "secrets",
+    "secrets.json",
+    "secrets.yaml",
+    "service-account.json",
+    "service_account.json",
+    "token.json",
+    "tokens.json",
+}
 TEXT_FILE_LANGUAGES = {
     ".c": "c",
     ".cpp": "cpp",
@@ -56,6 +114,16 @@ SAFE_EXCEPTION_TYPES = (
     TypeError,
     ValueError,
 )
+LOCAL_DIAGNOSTICS_PRODUCTION_MARKERS = (
+    "AWS_EXECUTION_ENV",
+    "AWS_LAMBDA_FUNCTION_NAME",
+    "DYNO",
+    "FLY_APP_NAME",
+    "K_SERVICE",
+    "RENDER",
+    "VERCEL",
+    "WEBSITE_SITE_NAME",
+)
 
 
 def _failed_graph_node(error: Exception) -> str:
@@ -76,6 +144,57 @@ def _safe_exception_type(error: Exception) -> str:
         if type(error) in SAFE_EXCEPTION_TYPES
         else "OtherError"
     )
+
+
+def _local_diagnostics_enabled(request: Request) -> bool:
+    """Enable stack-location diagnostics only for an explicitly local loopback run."""
+    if (
+        os.environ.get("THOUGHT2CODE_ENV") != "local"
+        or os.environ.get("THOUGHT2CODE_LOCAL_DIAGNOSTICS") != "1"
+        or any(os.environ.get(name) for name in LOCAL_DIAGNOSTICS_PRODUCTION_MARKERS)
+    ):
+        return False
+
+    client = request.client
+    server = request.scope.get("server")
+    if client is None or server is None:
+        return False
+    try:
+        return (
+            ip_address(client.host).is_loopback
+            and ip_address(server[0]).is_loopback
+        )
+    except ValueError:
+        return False
+
+
+def _diagnostic_class_name(error: BaseException) -> str:
+    exception_type = type(error)
+    module = getattr(exception_type, "__module__", "")
+    name = getattr(exception_type, "__qualname__", "")
+    safe_module = re.sub(r"[^A-Za-z0-9_.]", "_", module)[:120] or "unknown"
+    safe_name = re.sub(r"[^A-Za-z0-9_.<>-]", "_", name)[:120] or "unknown"
+    return f"{safe_module}.{safe_name}"
+
+
+def _diagnostic_exception_chain(error: BaseException) -> str:
+    classes: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and len(classes) < 8 and id(current) not in seen:
+        seen.add(id(current))
+        classes.append(_diagnostic_class_name(current))
+        current = current.__cause__ or current.__context__
+    return ">".join(classes)
+
+
+def _diagnostic_stack_locations(error: BaseException) -> str:
+    locations = []
+    for frame in traceback.extract_tb(error.__traceback__)[-20:]:
+        filename = re.sub(r"[^A-Za-z0-9_.-]", "_", pathlib.Path(frame.filename).name)[:120]
+        function = re.sub(r"[^A-Za-z0-9_.<>-]", "_", frame.name)[:120]
+        locations.append(f"{filename}:{function}:{frame.lineno}")
+    return ">".join(locations) or "unavailable"
 
 app = FastAPI(title="Thought2Code Local API", version="0.1.0")
 app.add_middleware(
@@ -219,6 +338,136 @@ def _completed_job_files(job_root: pathlib.Path) -> list[GeneratedFileInfo]:
     return sorted(result, key=lambda file: file.path)
 
 
+def _archive_path_is_allowed(file_info: GeneratedFileInfo) -> bool:
+    if (
+        "\x00" in file_info.path
+        or "\\" in file_info.path
+        or ":" in file_info.path
+        or re.match(r"^[a-zA-Z]:", file_info.path)
+    ):
+        return False
+    relative = PurePosixPath(file_info.path)
+    if (
+        not file_info.viewable
+        or relative.is_absolute()
+        or relative.as_posix() != file_info.path
+        or any(part in {".", ".."} or part.startswith(".") for part in relative.parts)
+        or any(
+            part.lower() in ARCHIVE_EXCLUDED_PARTS
+            or part.lower().endswith(("_cache", "-cache"))
+            for part in relative.parts
+        )
+    ):
+        return False
+
+    filename = relative.name.lower()
+    return (
+        filename not in ARCHIVE_EXCLUDED_NAMES
+        and not SENSITIVE_ARCHIVE_NAME_PATTERN.search(filename)
+        and not filename.startswith(".env")
+        and not filename.endswith(".zip")
+    )
+
+
+def _content_looks_sensitive(content: bytes) -> bool:
+    return any(pattern.search(content) for pattern in SENSITIVE_CONTENT_PATTERNS)
+
+
+def _secure_archive_open_supported() -> bool:
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+    )
+
+
+def _open_job_file_no_follow(job_root: pathlib.Path, requested_path: str):
+    file_path = _safe_job_file(job_root, requested_path)
+    relative_parts = file_path.relative_to(job_root).parts
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(job_root, directory_flags)
+    try:
+        for part in relative_parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        file_fd = os.open(
+            relative_parts[-1],
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=current_fd,
+        )
+    finally:
+        os.close(current_fd)
+    return os.fdopen(file_fd, "rb")
+
+
+def _archive_chunks(archive_file):
+    try:
+        while chunk := archive_file.read(64 * 1024):
+            yield chunk
+    finally:
+        archive_file.close()
+
+
+def _build_job_archive(job_root: pathlib.Path):
+    if not _secure_archive_open_supported():
+        raise HTTPException(
+            status_code=501,
+            detail="Safe project downloads are not supported on this platform.",
+        )
+    archive_file = tempfile.SpooledTemporaryFile(max_size=8 * 1_048_576, mode="w+b")
+    total_bytes = 0
+    archive_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(archive_file, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file_info in _completed_job_files(job_root):
+                if not _archive_path_is_allowed(file_info):
+                    continue
+                try:
+                    with _open_job_file_no_follow(job_root, file_info.path) as generated_file:
+                        metadata = os.fstat(generated_file.fileno())
+                        if (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_mode & 0o111
+                            or metadata.st_size > MAX_VIEWABLE_FILE_BYTES
+                        ):
+                            continue
+                        content = generated_file.read(MAX_VIEWABLE_FILE_BYTES + 1)
+                except (HTTPException, OSError):
+                    # A file that changed after listing is excluded from the archive.
+                    continue
+
+                if len(content) > MAX_VIEWABLE_FILE_BYTES:
+                    continue
+                try:
+                    content.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if _content_looks_sensitive(content):
+                    continue
+
+                archive_name = unicodedata.normalize("NFC", file_info.path).casefold()
+                if archive_name in archive_names:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="This project contains duplicate file paths.",
+                    )
+
+                total_bytes += len(content)
+                if total_bytes > MAX_DOWNLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="This project is too large to download safely.",
+                    )
+                archive_names.add(archive_name)
+                archive.writestr(file_info.path, content)
+        archive_file.seek(0)
+        return archive_file
+    except Exception:
+        archive_file.close()
+        raise
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -228,6 +477,20 @@ def health() -> dict[str, str]:
 def list_job_files(job_id: str) -> JobFilesResponse:
     job_root = _job_output_dir(job_id)
     return JobFilesResponse(job_id=job_id, files=_completed_job_files(job_root))
+
+
+@app.get("/jobs/{job_id}/download")
+def download_job(job_id: str) -> StreamingResponse:
+    job_root = _job_output_dir(job_id)
+    archive_file = _build_job_archive(job_root)
+    return StreamingResponse(
+        _archive_chunks(archive_file),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="thought2code-{job_id}.zip"'
+        },
+        background=BackgroundTask(archive_file.close),
+    )
 
 
 @app.get("/jobs/{job_id}/files/{file_path:path}", response_model=GeneratedFileResponse)
@@ -267,7 +530,7 @@ def get_job_file(job_id: str, file_path: str) -> GeneratedFileResponse:
 
 
 @app.post("/generate", response_model=GenerateResponse)
-def generate(request: GenerateRequest) -> GenerateResponse:
+def generate(request: GenerateRequest, http_request: Request) -> GenerateResponse:
     """Run generation synchronously in an isolated, server-owned directory."""
     job_id = uuid4().hex
     output_dir = (PROJECTS_ROOT / job_id).resolve()
@@ -327,6 +590,15 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             _failed_graph_node(error),
             _safe_exception_type(error),
         )
+        if _local_diagnostics_enabled(http_request):
+            logger.error(
+                "Local generation diagnostic job_id=%s node=%s exception=%s frames=%s chain=%s",
+                job_id,
+                _failed_graph_node(error),
+                _diagnostic_class_name(error),
+                _diagnostic_stack_locations(error),
+                _diagnostic_exception_chain(error),
+            )
         raise HTTPException(
             status_code=500,
             detail="Generation failed. Check the backend configuration and try again.",
