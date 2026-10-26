@@ -1,80 +1,79 @@
-# Thought2Code
+# Thought2Code.Ai
 
-**From an idea to working code.**
+**Ideas into code. Code into reality.**
 
-Thought2Code is an AI-powered platform designed to turn ideas expressed in natural language into working applications. The goal is to make software creation more accessible by allowing users to describe what they want to build instead of writing every line of code themselves.
+Thought2Code.Ai turns a natural-language project description into a planned application and generated project files. It combines a Python generation workflow with a local React interface for submitting ideas, browsing generated files, previewing supported websites, and downloading completed projects.
 
-## The Vision
+## How it works
 
-Imagine describing an application in plain English and watching it take shape. Thought2Code aims to make that possible through an AI-powered development workflow that plans, builds, and generates application files.
+The existing LangGraph workflow keeps its Planner → Architect → Coder structure:
 
-## How It Works
+- **Planner** creates a structured project plan.
+- **Architect** turns the plan into ordered implementation tasks.
+- **Coder** writes the project files through the existing file tools.
 
-Thought2Code uses a multi-agent workflow to coordinate the application-building process:
+The backend uses LangChain and Groq with the configured `openai/gpt-oss-120b` model. The FastAPI generation endpoint runs synchronously. The command-line entry point remains available alongside the API.
 
-- **Planning:** Understands the user's request and creates a structured project plan.
-- **Architecture:** Breaks the plan into implementation tasks and identifies the files needed.
-- **Code Generation:** Implements tasks and writes the resulting source files.
+## Stack
 
-The backend workflow is orchestrated using LangGraph.
+- Python 3.11+
+- LangGraph, LangChain, Groq, and Pydantic
+- FastAPI and Uvicorn
+- React and Vite
+- `uv` for Python dependencies
 
-## Technology Stack
+## Local setup
 
-- Python
-- LangGraph
-- LangChain
-- Groq API
-- Pydantic
-- `uv` for dependency management
+### Requirements
 
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11 or compatible version
+- Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- Node.js and npm
 - A Groq API key from the [Groq Console](https://console.groq.com/keys)
 
-### Setup
+### Install
 
-1. Clone the repository:
+```bash
+git clone https://github.com/Sohail-19/Thought2Code.Ai.git
+cd Thought2Code.Ai
+uv sync
+npm install --prefix frontend
+```
 
-   ```bash
-   git clone https://github.com/Sohail-19/Thought2Code.git
-   cd Thought2Code
-   ```
+Create a local `.env` based on `.sample_env` and add the Groq key there. Keep the key on the backend and never commit `.env`.
 
-2. Install dependencies:
+### Start the API
 
-   ```bash
-   uv sync
-   ```
+In one terminal, from the repository root:
 
-3. Create a `.env` file using `.sample_env` as a reference and add your Groq API key. Never commit your secrets.
+```bash
+uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-4. Start the backend:
+The API is intended for local development. Generation is synchronous and returns when the workflow finishes.
 
-   ```bash
-   uv run python main.py
-   ```
+### Start the frontend
 
-## Example Ideas
+In a second terminal, from the repository root:
 
-Try describing applications such as:
+```bash
+npm run dev --prefix frontend
+```
 
-- A modern to-do list with task management.
-- A responsive calculator.
-- A blog API with a database.
+Open the local Vite address printed in the terminal (normally `http://localhost:5173`). The frontend uses the local API at `http://127.0.0.1:8000` by default.
 
-## Roadmap
+### Use the CLI
 
-- [x] Multi-agent planning and code-generation workflow
-- [ ] Build a modern React + Vite frontend
-- [ ] Connect the frontend to the Python backend
-- [ ] Add generated-code validation and error recovery
-- [ ] Improve the application-building experience
+The command-line generation flow remains available from the repository root:
 
-## Project Status
+```bash
+uv run python main.py
+```
 
-Thought2Code is under active development. The current focus is evolving the backend into a complete application-generation platform and building an intuitive user interface.
+## Generated projects
 
+Completed jobs provide a project summary, generated file listing and text-file viewer. Supported HTML/CSS/JavaScript projects can be previewed in a restricted sandboxed iframe, and completed projects can be downloaded as ZIP archives. Generated code is untrusted; previewing it does not grant access to the Thought2Code.Ai parent interface or local files.
+
+## Licensing
+
+There is currently no top-level project `LICENSE` or `NOTICE` file. The project’s redistribution and reuse terms need an owner decision. Third-party libraries and assets remain subject to their respective licenses.

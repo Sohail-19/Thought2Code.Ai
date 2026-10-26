@@ -178,6 +178,6 @@ if __name__ == "__main__":
         {"recursion_limit": 100},
     )
 
-    print("Project generation finished.")
+    print("Thought2Code.Ai generation finished.")
     print("Final State:", result)
 

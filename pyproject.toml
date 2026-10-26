@@ -1,7 +1,7 @@
 [project]
-name = "thought2code"
+name = "thought2code-ai"
 version = "0.1.0"
-description = "An AI-powered platform that turns natural-language ideas into working applications."
+description = "Thought2Code.Ai turns natural-language project ideas into working applications."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

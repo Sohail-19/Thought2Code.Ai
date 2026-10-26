@@ -196,7 +196,7 @@ def _diagnostic_stack_locations(error: BaseException) -> str:
         locations.append(f"{filename}:{function}:{frame.lineno}")
     return ">".join(locations) or "unavailable"
 
-app = FastAPI(title="Thought2Code Local API", version="0.1.0")
+app = FastAPI(title="Thought2Code.Ai Local API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -487,7 +487,7 @@ def download_job(job_id: str) -> StreamingResponse:
         _archive_chunks(archive_file),
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="thought2code-{job_id}.zip"'
+            "Content-Disposition": f'attachment; filename="thought2code-ai-{job_id}.zip"'
         },
         background=BackgroundTask(archive_file.close),
     )

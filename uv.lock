@@ -835,7 +835,7 @@ wheels = [
 ]
 
 [[package]]
-name = "thought2code"
+name = "thought2code-ai"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

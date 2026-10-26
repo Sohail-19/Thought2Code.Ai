@@ -27,13 +27,13 @@ const EXAMPLES = [
 
 function Brand() {
   return (
-    <a className="brand" href="#top" aria-label="Thought2Code home">
+    <a className="brand" href="#top" aria-label="Thought2Code.Ai home">
       <span className="brand-mark" aria-hidden="true">
         <span />
         <span />
         <span />
       </span>
-      <span className="brand-name">thought<span>2</span>code</span>
+      <span className="brand-name">Thought2Code<span>.Ai</span></span>
     </a>
   );
 }
@@ -261,7 +261,7 @@ function App() {
       const objectUrl = URL.createObjectURL(archive);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = `thought2code-${jobId}.zip`;
+      link.download = `thought2code-ai-${jobId}.zip`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -291,8 +291,8 @@ function App() {
       <main className="main-content">
         <section className="hero">
           <div className="hero-eyebrow"><span className="eyebrow-line" /> AI-POWERED APP GENERATION</div>
-          <h1>Ideas in.<br /><span>Applications out.</span></h1>
-          <p className="hero-copy">Describe the thing you wish existed. Thought2Code will plan it and turn your idea into a working project.</p>
+          <h1>Ideas into code.<br /><span>Code into reality.</span></h1>
+          <p className="hero-copy">Describe the application you have in mind. Thought2Code.Ai plans the build and generates a working project you can explore, preview, and download.</p>
         </section>
 
         <section className="workspace" aria-label="Project generator">
@@ -346,7 +346,7 @@ function App() {
       </main>
       <footer className="footer">
         <Brand />
-        <span>From an idea to working code.</span>
+        <span>Ideas into code. Code into reality.</span>
         <span className="footer-build">BUILT FOR WHAT’S NEXT <i>✳</i></span>
       </footer>
     </div>

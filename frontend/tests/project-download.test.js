@@ -64,5 +64,5 @@ test("download action is disabled without a completed job and while downloading"
   const appSource = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
   assert.match(appSource, /disabled=\{!result \|\| result\.status !== "completed" \|\| downloading\}/);
   assert.match(appSource, /requestProjectArchive\(jobId, API_BASE_URL\)/);
-  assert.match(appSource, /link\.download = `thought2code-\$\{jobId\}\.zip`/);
+  assert.match(appSource, /link\.download = `thought2code-ai-\$\{jobId\}\.zip`/);
 });

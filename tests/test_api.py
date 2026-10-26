@@ -51,6 +51,7 @@ def test_health_check():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert api_main.app.title == "Thought2Code.Ai Local API"
 
 
 def test_generate_rejects_invalid_description():
@@ -201,7 +202,7 @@ def test_completed_job_download_contains_only_allowed_files_and_is_valid_zip(
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
     assert response.headers["content-disposition"] == (
-        f'attachment; filename="thought2code-{job_id}.zip"'
+        f'attachment; filename="thought2code-ai-{job_id}.zip"'
     )
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert set(archive.namelist()) == {"README.md", "index.html"}
