@@ -25,9 +25,9 @@ test("preview CSP blocks network connections and nested active content", () => {
 });
 
 test("preview combines same-job local styles and scripts before rendering", () => {
-  assert.match(source, /resolveProjectResource\(link\.getAttribute\("href"\), htmlPath, viewablePaths\)/);
-  assert.match(source, /resolveProjectResource\(script\.getAttribute\("src"\), htmlPath, viewablePaths\)/);
-  assert.match(source, /setAttribute\("href", encodeDataUri\("text\/css;charset=utf-8", css\)\)/);
+  assert.match(source, /resolveProjectResource\(href, htmlPath, projectPaths\)/);
+  assert.match(source, /resolveProjectResource\(src, htmlPath, projectPaths\)/);
+  assert.match(source, /setAttribute\("href", encodeDataUri\("text\/css;charset=utf-8", rewrittenCss\)\)/);
   assert.match(source, /setAttribute\("src", encodeDataUri\("text\/javascript;charset=utf-8", source\)\)/);
   assert.match(source, /head\.insertBefore\(bootstrap, csp\.nextSibling\)/);
 });

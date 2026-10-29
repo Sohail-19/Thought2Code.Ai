@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { getJobFile, getJobFiles } from "./api.js";
+import { getJobFile, getJobFiles, getJobPreviewAsset } from "./api.js";
 import { PREVIEW_BOOTSTRAP } from "./previewBootstrap.js";
+import {
+  containsCssImportRule,
+  CSS_IMPORT_PREVIEW_NOTICE,
+  createPreviewResourceLoader,
+  formatOmittedAssetNotice,
+  isNonLocalReference,
+  isPreviewAssetPath,
+  MODULE_PREVIEW_NOTICE,
+  resolveProjectResource,
+} from "./previewAssets.js";
 
 const PREVIEW_CSP = [
   "default-src 'none'",
@@ -35,38 +45,115 @@ function encodeDataUri(mime, content) {
   return `data:${mime};base64,${btoa(binary)}`;
 }
 
-function resolveProjectResource(reference, htmlPath, filePaths) {
-  if (!reference || reference.startsWith("/") || reference.startsWith("\\")) return null;
-  try {
-    const baseUrl = new URL(htmlPath, "https://thought2code-preview.invalid/");
-    const resourceUrl = new URL(reference, baseUrl);
-    if (resourceUrl.origin !== baseUrl.origin) return null;
-    const path = decodeURIComponent(resourceUrl.pathname.slice(1));
-    return filePaths.has(path) ? path : null;
-  } catch {
-    return null;
-  }
-}
-
 async function buildPreview(jobId, htmlPath, htmlText, files) {
   const doc = new DOMParser().parseFromString(htmlText, "text/html");
-  const viewablePaths = new Set(files.filter((file) => file.viewable).map((file) => file.path));
-  const resources = new Map();
+  const projectPaths = new Set(files.map((file) => file.path));
+  const resourceLoader = createPreviewResourceLoader();
   let bundledBytes = new TextEncoder().encode(htmlText).length;
+  let omittedAssets = 0;
 
-  async function loadResource(path) {
-    if (resources.has(path)) return resources.get(path);
-    if (resources.size >= 30) throw new Error("This project references too many local files to preview safely.");
-    const response = await getJobFile(jobId, path);
-    if (typeof response.content !== "string" || response.path !== path) {
-      throw new Error("The API returned an invalid project file.");
+  async function loadTextResource(path) {
+    const result = await resourceLoader.load(path, async () => {
+      const response = await getJobFile(jobId, path);
+      if (typeof response.content !== "string" || response.path !== path) {
+        throw new Error("The API returned an invalid project file.");
+      }
+      const resourceBytes = new TextEncoder().encode(response.content).length;
+      if (bundledBytes + resourceBytes > 2 * 1024 * 1024) {
+        throw new Error("This project is too large to preview safely (2 MB limit).");
+      }
+      bundledBytes += resourceBytes;
+      return response.content;
+    });
+    if (result.limited) throw new Error("This project references too many local files to preview safely.");
+    if (result.error) throw result.error;
+    return result.value;
+  }
+
+  async function loadAssetDataUri(path) {
+    if (!isPreviewAssetPath(path)) {
+      omittedAssets += 1;
+      return null;
     }
-    bundledBytes += new TextEncoder().encode(response.content).length;
-    if (bundledBytes > 2 * 1024 * 1024) {
-      throw new Error("This project is too large to preview safely (2 MB limit).");
+    const result = await resourceLoader.load(path, async () => {
+      const response = await getJobPreviewAsset(jobId, path);
+      const bytes = new Uint8Array(response.content);
+      if (bundledBytes + bytes.byteLength > 2 * 1024 * 1024) {
+        throw new Error("This project is too large to preview safely (2 MB limit).");
+      }
+      bundledBytes += bytes.byteLength;
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+      }
+      return `data:${response.contentType};base64,${btoa(binary)}`;
+    });
+    if (result.limited) {
+      omittedAssets += 1;
+      return null;
     }
-    resources.set(path, response.content);
-    return response.content;
+    if (result.error) {
+      if (result.error.message?.includes("2 MB limit")) throw result.error;
+      omittedAssets += 1;
+      return null;
+    }
+    return result.value;
+  }
+
+  async function rewriteCss(css, sourcePath) {
+    if (containsCssImportRule(css)) throw new Error(CSS_IMPORT_PREVIEW_NOTICE);
+    const matches = [...css.matchAll(/url\(\s*(?:(["'])(.*?)\1|([^)]*?))\s*\)/gi)];
+    let result = css;
+    for (const match of matches) {
+      const raw = (match[2] ?? match[3] ?? "").trim();
+      if (isNonLocalReference(raw)) continue;
+      const localPath = resolveProjectResource(raw, sourcePath, projectPaths);
+      const replacement = localPath ? await loadAssetDataUri(localPath) : null;
+      if (!replacement) {
+        result = result.replace(match[0], 'url("")');
+        if (!localPath) omittedAssets += 1;
+      } else {
+        result = result.replace(match[0], `url("${replacement}")`);
+      }
+    }
+    return result;
+  }
+
+  async function embedAssetAttribute(element, attribute, sourcePath) {
+    const value = element.getAttribute(attribute);
+    if (!value || isNonLocalReference(value)) return;
+    const localPath = resolveProjectResource(value, sourcePath, projectPaths);
+    if (localPath && isPreviewAssetPath(localPath)) {
+      const uri = await loadAssetDataUri(localPath);
+      if (uri) {
+        element.setAttribute(attribute, uri);
+        return;
+      }
+    }
+    element.removeAttribute(attribute);
+    omittedAssets += 1;
+  }
+
+  async function embedSrcset(element, sourcePath) {
+    const value = element.getAttribute("srcset");
+    if (!value || isNonLocalReference(value)) return;
+    const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+    const rewritten = [];
+    for (const entry of entries) {
+      const [reference, ...descriptor] = entry.split(/\s+/);
+      if (isNonLocalReference(reference)) {
+        rewritten.push(entry);
+        continue;
+      }
+      const localPath = resolveProjectResource(reference, sourcePath, projectPaths);
+      const uri = localPath && isPreviewAssetPath(localPath)
+        ? await loadAssetDataUri(localPath)
+        : null;
+      if (uri) rewritten.push([uri, ...descriptor].join(" "));
+      else omittedAssets += 1;
+    }
+    if (rewritten.length) element.setAttribute("srcset", rewritten.join(", "));
+    else element.removeAttribute("srcset");
   }
 
   doc.querySelectorAll("base, iframe, object, embed, portal").forEach((node) => node.remove());
@@ -77,34 +164,56 @@ async function buildPreview(jobId, htmlPath, htmlText, files) {
       link.remove();
       continue;
     }
-    const localPath = resolveProjectResource(link.getAttribute("href"), htmlPath, viewablePaths);
+    const href = link.getAttribute("href");
+    const localPath = resolveProjectResource(href, htmlPath, projectPaths);
     if (!localPath || extensionOf(localPath) !== "css") {
-      link.remove();
+      if (!isNonLocalReference(href)) {
+        link.remove();
+        omittedAssets += 1;
+      }
       continue;
     }
-    const css = await loadResource(localPath);
-    link.setAttribute("href", encodeDataUri("text/css;charset=utf-8", css));
+    const css = await loadTextResource(localPath);
+    const rewrittenCss = await rewriteCss(css, localPath);
+    link.setAttribute("href", encodeDataUri("text/css;charset=utf-8", rewrittenCss));
     link.removeAttribute("integrity");
     link.removeAttribute("crossorigin");
   }
 
+  if ([...doc.querySelectorAll("script")].some(
+    (script) => script.getAttribute("type")?.trim().toLowerCase() === "module",
+  )) {
+    throw new Error(MODULE_PREVIEW_NOTICE);
+  }
+
   for (const script of [...doc.querySelectorAll("script[src]")]) {
-    const localPath = resolveProjectResource(script.getAttribute("src"), htmlPath, viewablePaths);
+    const src = script.getAttribute("src");
+    const localPath = resolveProjectResource(src, htmlPath, projectPaths);
     if (!localPath || extensionOf(localPath) !== "js") {
-      script.remove();
+      if (!isNonLocalReference(src)) {
+        script.remove();
+        omittedAssets += 1;
+      }
       continue;
     }
-    const source = await loadResource(localPath);
+    const source = await loadTextResource(localPath);
     script.setAttribute("src", encodeDataUri("text/javascript;charset=utf-8", source));
     script.removeAttribute("integrity");
     script.removeAttribute("crossorigin");
   }
 
-  for (const element of doc.querySelectorAll("img, audio, video, source, track")) {
-    for (const attribute of ["src", "srcset", "poster"]) {
-      const value = element.getAttribute(attribute);
-      if (value && !/^(data:|blob:)/i.test(value)) element.removeAttribute(attribute);
-    }
+  for (const element of doc.querySelectorAll("img, audio, video, source, track, input[type='image']")) {
+    for (const attribute of ["src", "poster"]) await embedAssetAttribute(element, attribute, htmlPath);
+    await embedSrcset(element, htmlPath);
+  }
+  for (const link of doc.querySelectorAll('link[rel~="icon" i]')) {
+    await embedAssetAttribute(link, "href", htmlPath);
+  }
+  for (const style of doc.querySelectorAll("style")) {
+    style.textContent = await rewriteCss(style.textContent, htmlPath);
+  }
+  for (const element of doc.querySelectorAll("[style]")) {
+    element.setAttribute("style", await rewriteCss(element.getAttribute("style"), htmlPath));
   }
 
   const csp = doc.createElement("meta");
@@ -114,7 +223,8 @@ async function buildPreview(jobId, htmlPath, htmlText, files) {
   const bootstrap = doc.createElement("script");
   bootstrap.textContent = PREVIEW_BOOTSTRAP;
   doc.head.insertBefore(bootstrap, csp.nextSibling);
-  return `<!doctype html>${doc.documentElement.outerHTML}`;
+  const html = `<!doctype html>${doc.documentElement.outerHTML}`;
+  return { html, omittedAssets };
 }
 
 function FileList({ files, selectedPath, onSelect }) {
@@ -162,7 +272,7 @@ function CodeViewer({ file, loading, error }) {
   );
 }
 
-function PreviewPane({ state, message, srcDoc, selectedHtml, onSelectHtml, htmlFiles }) {
+function PreviewPane({ state, message, srcDoc, selectedHtml, onSelectHtml, htmlFiles, omittedAssets }) {
   if (state === "loading") {
     return <div className="preview-message"><span className="preview-spinner" />Preparing a sandboxed preview…</div>;
   }
@@ -188,6 +298,7 @@ function PreviewPane({ state, message, srcDoc, selectedHtml, onSelectHtml, htmlF
         referrerPolicy="no-referrer"
         srcDoc={srcDoc}
       />
+      {omittedAssets > 0 && <p className="preview-safety-note">{formatOmittedAssetNotice(omittedAssets)}</p>}
       <p className="preview-safety-note">Sandboxed preview. External resources and connections are blocked; generated local CSS and JavaScript are loaded from this job only. Browser storage is temporary within the preview.</p>
     </div>
   );
@@ -205,6 +316,7 @@ export default function ProjectFiles({ jobId, fallbackFiles = [] }) {
   const [previewState, setPreviewState] = useState("idle");
   const [previewDoc, setPreviewDoc] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [omittedAssets, setOmittedAssets] = useState(0);
   const [selectedHtml, setSelectedHtml] = useState("");
 
   useEffect(() => {
@@ -280,7 +392,8 @@ export default function ProjectFiles({ jobId, fallbackFiles = [] }) {
     try {
       const html = await getJobFile(jobId, htmlPath);
       const built = await buildPreview(jobId, htmlPath, html.content, files);
-      setPreviewDoc(built);
+      setPreviewDoc(built.html);
+      setOmittedAssets(built.omittedAssets);
       setPreviewState("ready");
     } catch (error) {
       setPreviewError(error.message || "One or more project files could not be loaded.");
@@ -328,6 +441,7 @@ export default function ProjectFiles({ jobId, fallbackFiles = [] }) {
           selectedHtml={selectedHtml}
           onSelectHtml={preparePreview}
           htmlFiles={htmlFiles}
+          omittedAssets={omittedAssets}
         />
       )}
     </section>

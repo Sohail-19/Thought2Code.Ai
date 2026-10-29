@@ -291,7 +291,7 @@ function App() {
       <main className="main-content">
         <section className="hero">
           <div className="hero-eyebrow"><span className="eyebrow-line" /> AI-POWERED APP GENERATION</div>
-          <h1>Ideas into code.<br /><span>Code into reality.</span></h1>
+          <h1>Describe it.<br /><span>Build it.</span></h1>
           <p className="hero-copy">Describe the application you have in mind. Thought2Code.Ai plans the build and generates a working project you can explore, preview, and download.</p>
         </section>
 
@@ -346,7 +346,7 @@ function App() {
       </main>
       <footer className="footer">
         <Brand />
-        <span>Ideas into code. Code into reality.</span>
+        <span>Describe it. Build it.</span>
         <span className="footer-build">BUILT FOR WHAT’S NEXT <i>✳</i></span>
       </footer>
     </div>

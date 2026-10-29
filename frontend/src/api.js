@@ -28,3 +28,22 @@ export function getJobFile(jobId, filePath) {
     `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/files/${encodedPath}`,
   );
 }
+
+export async function getJobPreviewAsset(jobId, filePath) {
+  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+  const response = await fetch(
+    `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/preview-assets/${encodedPath}`,
+  );
+  if (!response.ok) {
+    let body;
+    try { body = await response.json(); } catch { /* Use the safe fallback below. */ }
+    throw new Error(
+      typeof body?.detail === "string" ? body.detail : "A preview asset could not be loaded.",
+    );
+  }
+  const contentType = response.headers.get("content-type")?.split(";")[0].toLowerCase();
+  if (!contentType || !/^(image|font|audio|video)\//.test(contentType)) {
+    throw new Error("The API returned an unsupported preview asset.");
+  }
+  return { content: await response.arrayBuffer(), contentType };
+}
