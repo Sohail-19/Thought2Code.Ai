@@ -1,1 +1,18 @@
 GROQ_API_KEY=<YOUR_API_KEY_HERE>
+
+# Local frontend origin. For hosted deployments, set the exact frontend origin
+# in the backend dashboard as THOUGHT2CODE_ALLOWED_ORIGINS.
+THOUGHT2CODE_ALLOWED_ORIGINS=http://localhost:5173
+THOUGHT2CODE_GENERATION_ENABLED=true
+# Local development defaults to non-public mode. On Render, set
+# THOUGHT2CODE_PUBLIC_DEMO=true and provide the Free Key Value URL below;
+# public generation fails closed if shared protection is unavailable.
+# THOUGHT2CODE_REDIS_URL=
+# Keep generated jobs temporary on Render's ephemeral filesystem.
+THOUGHT2CODE_PROJECTS_ROOT=/tmp/thought2code/jobs
+THOUGHT2CODE_ORPHAN_JOB_RETENTION_SECONDS=86400
+THOUGHT2CODE_COMPLETED_JOB_RETENTION_SECONDS=86400
+THOUGHT2CODE_MAX_REQUEST_BODY_BYTES=65536
+THOUGHT2CODE_CLIENT_RATE_LIMIT=5
+THOUGHT2CODE_CLIENT_RATE_WINDOW_SECONDS=3600
+THOUGHT2CODE_MAX_CONCURRENT_GENERATIONS=1

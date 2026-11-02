@@ -41,9 +41,11 @@ from agent.runtime import (
     ORPHAN_CLEANUP_MAX_JOBS,
     ORPHAN_CLEANUP_MAX_TREE_ENTRIES,
     ORPHAN_JOB_RETENTION_SECONDS,
+    COMPLETED_JOB_RETENTION_SECONDS,
     MAX_GRAPH_RECURSION_STEPS,
     MAX_CODER_AGENT_RECURSION_STEPS,
     GENERATION_TIMEOUT_SECONDS,
+    MODEL_REQUEST_TIMEOUT_SECONDS,
     MAX_REQUEST_BODY_BYTES,
     MAX_CONCURRENT_GENERATIONS,
     MAX_GENERATED_FILE_BYTES,
@@ -64,9 +66,18 @@ from agent.runtime import (
     local_diagnostic_scope,
 )
 from api.job_cleanup import active_job, cleanup_orphan_jobs
+from api.deployment_protection import (
+    ProtectionStoreUnavailable,
+    configured_origins,
+    protection,
+)
 
 
-PROJECTS_ROOT = pathlib.Path(__file__).resolve().parents[1] / "generated_project" / "jobs"
+_DEFAULT_PROJECTS_ROOT = pathlib.Path(__file__).resolve().parents[1] / "generated_project" / "jobs"
+PROJECTS_ROOT = pathlib.Path(
+    os.environ.get("THOUGHT2CODE_PROJECTS_ROOT", "").strip()
+    or str(_DEFAULT_PROJECTS_ROOT)
+).expanduser()
 JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SENSITIVE_ARCHIVE_NAME_PATTERN = re.compile(
     r"(^|[._-])(credential|credentials|secret|secrets|token|tokens|password|passwords|private[_-]?key|api[_-]?key)([._-]|$)"
@@ -688,7 +699,7 @@ app.add_middleware(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=configured_origins(),
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
@@ -1717,7 +1728,47 @@ def _generate_job(request: GenerateRequest, http_request: Request) -> GenerateRe
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest, http_request: Request) -> GenerateResponse:
     """Bound local synchronous generation without claiming hard cancellation."""
+    if not protection.generation_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Generation is temporarily disabled. Please try again later.",
+        )
+    if protection.public_demo and not protection.shared_store_ready:
+        logger.error("Public generation disabled because shared protection is unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Generation protection is temporarily unavailable. Please try again later.",
+        )
+    client_identity = (
+        http_request.client.host if http_request.client is not None else "unknown"
+    )
+    try:
+        if not protection.request_allowed(client_identity):
+            raise HTTPException(
+                status_code=429,
+                detail="Generation request limit reached. Please wait and try again later.",
+            )
+        distributed_slot = protection.acquire_distributed_slot(
+            lease_seconds=int(
+                GENERATION_TIMEOUT_SECONDS + MODEL_REQUEST_TIMEOUT_SECONDS + 180
+            )
+        )
+    except ProtectionStoreUnavailable:
+        logger.error("Generation protection store is unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Generation protection is temporarily unavailable. Please try again later.",
+        ) from None
+    if distributed_slot is None:
+        raise HTTPException(
+            status_code=503,
+            detail="The generation service is busy. Please try again shortly.",
+        )
     if not _GENERATION_SLOTS.acquire(blocking=False):
+        try:
+            protection.release_distributed_slot(distributed_slot)
+        except ProtectionStoreUnavailable:
+            logger.warning("Generation slot release deferred until lease expiry")
         raise HTTPException(
             status_code=503,
             detail="The generation service is busy. Please try again shortly.",
@@ -1726,6 +1777,7 @@ def generate(request: GenerateRequest, http_request: Request) -> GenerateRespons
         cleanup = cleanup_orphan_jobs(
             PROJECTS_ROOT,
             retention_seconds=ORPHAN_JOB_RETENTION_SECONDS,
+            completed_retention_seconds=COMPLETED_JOB_RETENTION_SECONDS,
             max_jobs=ORPHAN_CLEANUP_MAX_JOBS,
             max_entries=ORPHAN_CLEANUP_MAX_ENTRIES,
             max_tree_entries=ORPHAN_CLEANUP_MAX_TREE_ENTRIES,
@@ -1758,3 +1810,7 @@ def generate(request: GenerateRequest, http_request: Request) -> GenerateRespons
                 ) from None
     finally:
         _GENERATION_SLOTS.release()
+        try:
+            protection.release_distributed_slot(distributed_slot)
+        except ProtectionStoreUnavailable:
+            logger.warning("Generation slot release deferred until lease expiry")

@@ -343,9 +343,50 @@ def _has_completion_marker(root: pathlib.Path, job_id: str) -> bool | None:
         return False
     except OSError:
         return None
-    # Even a malformed marker is treated conservatively as completed so cleanup
-    # never removes a job whose completion state cannot be safely determined.
-    return True
+    # Ambiguous marker state is never treated as an incomplete job or eligible
+    # for retention cleanup.
+    return True if stat.S_ISREG(marker_stat.st_mode) else None
+
+
+def _remove_completion_marker(root_descriptor: int, job_id: str) -> None:
+    """Unlink a completed marker through a pinned, no-follow directory handle."""
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        expected_directory = os.stat(
+            ".completed", dir_fd=root_descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(expected_directory.st_mode):
+        raise OSError("Invalid completion marker directory")
+    marker_directory = os.open(
+        ".completed", directory_flags, dir_fd=root_descriptor
+    )
+    try:
+        opened_directory = os.fstat(marker_directory)
+        if (opened_directory.st_dev, opened_directory.st_ino) != (
+            expected_directory.st_dev,
+            expected_directory.st_ino,
+        ):
+            raise OSError("Completion marker directory changed")
+        marker_name = f"{job_id}.done"
+        try:
+            marker_stat = os.stat(
+                marker_name, dir_fd=marker_directory, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(marker_stat.st_mode):
+            raise OSError("Invalid completion marker")
+        # unlinkat does not follow a replacement symlink; it can only remove
+        # the named entry inside this already-pinned marker directory.
+        os.unlink(marker_name, dir_fd=marker_directory)
+    finally:
+        os.close(marker_directory)
 
 
 def _tree_within_entry_limit(job_root: pathlib.Path, max_entries: int) -> bool | None:
@@ -392,16 +433,17 @@ def cleanup_orphan_jobs(
     *,
     now: float | None = None,
     retention_seconds: int,
+    completed_retention_seconds: int | None = None,
     max_jobs: int,
     max_entries: int,
     max_tree_entries: int = 1_000,
 ) -> CleanupResult:
-    """Remove only old, unmarked job directories while holding their job lock.
+    """Remove stale partial jobs and, optionally, expired completed jobs.
 
-    Completed jobs are retained indefinitely. Directory age is measured from its
-    last root-directory modification; the active-job context refreshes that time
-    when generation ends, preserving partial failures for the full retention
-    window. The scan and number of deletions are both bounded by caller limits.
+    Age uses the job directory's last modification time; the active-job context
+    refreshes it when generation ends. Deletion is locked, path-contained,
+    no-follow, and bounded by caller limits. A missing or malformed marker is
+    conservatively retained when completion state cannot be established.
     """
     root_input = pathlib.Path(projects_root)
     try:
@@ -431,7 +473,16 @@ def cleanup_orphan_jobs(
         return CleanupResult(errors=1)
 
     current_time = time.time() if now is None else now
-    threshold = current_time - retention_seconds
+    partial_threshold = current_time - retention_seconds
+    completed_threshold = (
+        current_time - completed_retention_seconds
+        if completed_retention_seconds is not None
+        else None
+    )
+    oldest_eligible_threshold = max(
+        partial_threshold,
+        completed_threshold if completed_threshold is not None else partial_threshold,
+    )
     scanned = removed = skipped_active = skipped_oversized = errors = 0
     try:
         with _bounded_scandir(root, max_entries) as entries:
@@ -446,7 +497,7 @@ def cleanup_orphan_jobs(
                     entry_stat = entry.stat(follow_symlinks=False)
                     if (
                         not stat.S_ISDIR(entry_stat.st_mode)
-                        or entry_stat.st_mtime > threshold
+                        or entry_stat.st_mtime > oldest_eligible_threshold
                     ):
                         continue
                     candidate = root / entry.name
@@ -463,13 +514,18 @@ def cleanup_orphan_jobs(
                             skipped_active += 1
                             continue
                         completed = _has_completion_marker(root, entry.name)
-                        if completed is None or completed:
+                        if completed is None:
                             continue
+                        if completed and completed_threshold is None:
+                            continue
+                        retention_threshold = (
+                            completed_threshold if completed else partial_threshold
+                        )
                         try:
                             current_stat = candidate.lstat()
                             if (
                                 not stat.S_ISDIR(current_stat.st_mode)
-                                or current_stat.st_mtime > threshold
+                                or current_stat.st_mtime > retention_threshold
                                 or candidate.resolve(strict=True).parent != root
                             ):
                                 continue
@@ -507,6 +563,11 @@ def cleanup_orphan_jobs(
                                 skipped_oversized += 1
                                 continue
                             removed += 1
+                            if completed:
+                                try:
+                                    _remove_completion_marker(root_descriptor, entry.name)
+                                except (OSError, RuntimeError):
+                                    errors += 1
                             if lock_path is not None:
                                 try:
                                     lock_path.unlink(missing_ok=True)

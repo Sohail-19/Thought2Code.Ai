@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ProjectFiles from "./ProjectFiles.jsx";
 import { API_BASE_URL } from "./api.js";
 import { parseGenerateResponse } from "./generationResponse.js";
 import { requestProjectArchive } from "./projectDownload.js";
+import { getInitialTheme, persistTheme } from "./theme.js";
 
 const EXAMPLES = [
   {
@@ -38,7 +39,28 @@ function Brand() {
   );
 }
 
-function Header() {
+function ThemeToggle({ theme, onToggle }) {
+  const nextTheme = theme === "light" ? "dark" : "light";
+  return (
+    <button
+      className="theme-toggle"
+      type="button"
+      onClick={onToggle}
+      aria-label={`Switch to ${nextTheme} mode`}
+      aria-pressed={theme === "dark"}
+      title={`Switch to ${nextTheme} mode`}
+    >
+      {nextTheme === "dark" ? (
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.7 12.8A7.5 7.5 0 0 1 7.2 3.3a7.6 7.6 0 1 0 9.5 9.5Z" /></svg>
+      ) : (
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4" /><path d="M10 1.8v2M10 16.2v2M18.2 10h-2M3.8 10h-2m14-5.8-1.4 1.4M5.6 14.4l-1.4 1.4m11.6 0-1.4-1.4M5.6 5.6 4.2 4.2" /></svg>
+      )}
+      <span>{nextTheme === "dark" ? "Dark" : "Light"}</span>
+    </button>
+  );
+}
+
+function Header({ theme, onToggleTheme }) {
   return (
     <header className="topbar">
       <Brand />
@@ -46,6 +68,7 @@ function Header() {
         <span className="local-indicator"><i /> Local workspace</span>
         <span className="topbar-divider" />
         <span className="version-label">EARLY ACCESS</span>
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
       </div>
     </header>
   );
@@ -191,12 +214,22 @@ function isGenerateResponse(value) {
 }
 
 function App() {
+  const [theme, setTheme] = useState(() => getInitialTheme());
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    persistTheme(theme);
+    const themeColor = document.querySelector('meta[name="theme-color"]');
+    if (themeColor) themeColor.content = theme === "dark" ? "#0b0d14" : "#f2f4fa";
+  }, [theme]);
 
   const promptLength = prompt.trim().length;
   const promptError = promptLength > 0 && promptLength < 10
@@ -287,7 +320,10 @@ function App() {
   return (
     <div className="app-shell" id="top">
       <div className="ambient-glow" aria-hidden="true" />
-      <Header />
+      <Header
+        theme={theme}
+        onToggleTheme={() => setTheme((current) => current === "light" ? "dark" : "light")}
+      />
       <main className="main-content">
         <section className="hero">
           <div className="hero-eyebrow"><span className="eyebrow-line" /> AI-POWERED APP GENERATION</div>

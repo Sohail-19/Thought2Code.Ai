@@ -619,9 +619,20 @@ def test_api_request_runs_bounded_cleanup_before_generation(monkeypatch, tmp_pat
     import os
     import time
 
-    os.utime(stale_job, (time.time() - 600, time.time() - 600))
+    old_time = time.time() - 600
+    os.utime(stale_job, (old_time, old_time))
+    completed_id = uuid4().hex
+    completed_job = jobs_root / completed_id
+    completed_job.mkdir()
+    (completed_job / "index.html").write_text("<h1>old demo</h1>")
+    os.utime(completed_job, (old_time, old_time))
+    completed_markers = jobs_root / ".completed"
+    completed_markers.mkdir()
+    completed_marker = completed_markers / f"{completed_id}.done"
+    completed_marker.touch()
     monkeypatch.setattr(api_main, "PROJECTS_ROOT", jobs_root)
     monkeypatch.setattr(api_main, "ORPHAN_JOB_RETENTION_SECONDS", 60)
+    monkeypatch.setattr(api_main, "COMPLETED_JOB_RETENTION_SECONDS", 60)
 
     def fake_invoke(_state, _config):
         write_file.invoke({"path": "app.py", "content": "print('ready')"})
@@ -634,6 +645,8 @@ def test_api_request_runs_bounded_cleanup_before_generation(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     assert not stale_job.exists()
+    assert not completed_job.exists()
+    assert not completed_marker.exists()
     assert (jobs_root / response.json()["job_id"] / "app.py").exists()
 
 

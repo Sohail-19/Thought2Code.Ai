@@ -78,6 +78,78 @@ def test_cleanup_preserves_completed_and_recent_jobs(tmp_path):
     assert not (root / ".active" / f"{recent_id}.lock").exists()
 
 
+def test_cleanup_expires_completed_jobs_and_removes_their_markers(tmp_path):
+    root = tmp_path / "jobs"
+    now = time.time()
+    expired_id, expired = make_job(root, modified_at=now - 600)
+    recent_id, recent = make_job(root, modified_at=now - 30)
+    marker_root = root / ".completed"
+    marker_root.mkdir()
+    expired_marker = marker_root / f"{expired_id}.done"
+    recent_marker = marker_root / f"{recent_id}.done"
+    expired_marker.touch()
+    recent_marker.touch()
+
+    result = cleanup(
+        root,
+        now=now,
+        retention_seconds=60,
+        completed_retention_seconds=300,
+    )
+
+    assert result.removed_jobs == 1
+    assert not expired.exists()
+    assert not expired_marker.exists()
+    assert recent.exists()
+    assert recent_marker.is_file()
+
+
+def test_cleanup_preserves_active_completed_jobs_until_the_lock_is_released(
+    tmp_path,
+):
+    root = tmp_path / "jobs"
+    job_id = uuid4().hex
+    now = time.time()
+    marker_root = root / ".completed"
+    marker_root.mkdir(parents=True)
+    (marker_root / f"{job_id}.done").touch()
+    with active_job(root, job_id):
+        directory = root / job_id
+        directory.mkdir()
+        (directory / "index.html").write_text("<h1>ok</h1>")
+        os.utime(directory, (now - 600, now - 600))
+        result = cleanup(
+            root,
+            now=now,
+            retention_seconds=60,
+            completed_retention_seconds=300,
+        )
+        assert result.removed_jobs == 0
+        assert result.skipped_active == 1
+        assert directory.exists()
+
+    # active_job refreshes the job timestamp after leaving the critical section.
+    assert cleanup(
+        root,
+        now=now,
+        retention_seconds=60,
+        completed_retention_seconds=300,
+    ).removed_jobs == 0
+
+
+def test_cleanup_retains_ambiguous_completion_markers(tmp_path):
+    root = tmp_path / "jobs"
+    job_id, directory = make_job(root, modified_at=time.time() - 600)
+    marker_root = root / ".completed"
+    marker_root.mkdir()
+    (marker_root / f"{job_id}.done").mkdir()
+
+    result = cleanup(root, completed_retention_seconds=60)
+
+    assert result.removed_jobs == 0
+    assert directory.exists()
+
+
 def test_cleanup_does_not_follow_job_symlinks_outside_root(tmp_path):
     root = tmp_path / "jobs"
     root.mkdir()

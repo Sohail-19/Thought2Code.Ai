@@ -1,9 +1,24 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0d14" />
+    <script>
+      (() => {
+        let theme = "dark";
+        try {
+          const saved = localStorage.getItem("thought2code-theme");
+          if (saved === "dark" || saved === "light") theme = saved;
+        } catch {
+          // Keep the first-visit dark theme when storage is unavailable.
+        }
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        const themeColor = document.querySelector('meta[name="theme-color"]');
+        if (themeColor) themeColor.content = theme === "dark" ? "#0b0d14" : "#f2f4fa";
+      })();
+    </script>
     <meta
       name="description"
       content="Describe an application in natural language. Thought2Code.Ai plans the build and generates a working project."
